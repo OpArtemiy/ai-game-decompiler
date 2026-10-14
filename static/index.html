@@ -1,0 +1,22 @@
+<!doctype html><meta charset=utf-8><title>Game Decompiler</title>
+<body style="font-family:sans-serif;max-width:640px;margin:40px auto">
+<h1>AI Game Decompiler</h1>
+<p>Upload a Unity (Mono) game folder as .zip, or Assembly-CSharp.dll. Only upload games you own or may analyze.</p>
+
+<input type=file id=f accept=".zip,.dll"> <button onclick=go()>Decompile</button>
+
+<p id=s></p><p id=d></p>
+
+<script>
+async function go(){
+ const f=document.getElementById('f').files[0]; if(!f)return;
+ const s=document.getElementById('s'); s.textContent='Uploading...';
+ const fd=new FormData(); fd.append('file',f);
+ const r=await fetch('/upload',{method:'POST',body:fd});
+ if(!r.ok){s.textContent=(await r.json()).detail;return}
+ const id=(await r.json()).job_id;
+ const t=setInterval(async()=>{
+  const j=await (await fetch('/status/'+id)).json(); s.textContent=j.message;
+  if(j.state=='done'){clearInterval(t);document.getElementById('d').innerHTML='<a href="/download/'+id+'">Download result</a>'}
+  if(j.state=='error')clearInterval(t)},2000)}
+</script>

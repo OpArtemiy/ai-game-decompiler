@@ -1,0 +1,20 @@
+[Unit]
+Description=Game decompiler
+After=network.target
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/app
+Environment=PATH=/home/ubuntu/app/venv/bin:/home/ubuntu/.dotnet/tools:/usr/bin:/bin
+
+Environment=DOTNET_ROOT=/usr/lib/dotnet
+
+Environment=MAX_FILES=20
+
+ExecStart=/home/ubuntu/app/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+
+Restart=always
+
+[Install]
+
+WantedBy=multi-user.target
+
