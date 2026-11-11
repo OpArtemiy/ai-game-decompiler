@@ -1,162 +1,118 @@
-import os
 import re
 import shutil
-import subprocess
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 from pathlib import Path
 
-
-from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile
-
-from fastapi.responses import FileResponse
-
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-
-from ai import clean_code, make_overview
-
-from decompile import UnsupportedGame, decompile, find_target_dll, safe_extract
-
-
-BASE = Path(__file__).resolve().parent
-
-JOBS = BASE / "jobs"
-
-JOBS.mkdir(exist_ok=True)
-
-
-MAX_UPLOAD = 300 * 1024 * 1024                    # 300 MB
-
-MAX_FILES = int(os.environ.get("MAX_FILES", "20"))  # cost cap while testing
-
-MAX_CHARS = 15000                                  # skip files bigger than this
-
-MIN_LINES = 8                                      # skip tiny files
-
-WORKERS = 1                                        # parallel AI calls
-
+import config
+import pipeline
+from store import JobStore
 
 app = FastAPI()
-
-STATUS = {}  # job_id -> {"state": ..., "message": ...}
-
-def set_status(job_id, state, message):
-    STATUS[job_id] = {"state": state, "message": message}
-def process(job_id: str):
-    job = JOBS / job_id
-    try:
-        set_status(job_id, "running", "Unpacking upload...")
-        up = job / "upload"
-        for z in list(up.glob("*.zip")):
-            safe_extract(z, up / "unzipped")
-
-        set_status(job_id, "running", "Finding the game code...")
-        dll = find_target_dll(up)
+store = JobStore(config.JOBS_DIR)
+ALLOWED = ('.zip', '.dll', '.apk', '.jar')
+ID_RE = re.compile(r'[0-9a-f]{32}')
 
 
-        set_status(job_id, "running", f"Decompiling {dll.name}...")
-        raw = job / "raw"
-        decompile(dll, raw)
-
-        candidates = [
-            f for f in sorted(raw.rglob("*.cs"))
-            if "Properties" not in f.relative_to(raw).parts
-            and len(f.read_text(errors="ignore").splitlines()) >= MIN_LINES
-        ]
-        chosen = candidates[:MAX_FILES]
-        if not chosen:
-            raise UnsupportedGame("No source files were produced from this file.")
-
-        def clean_one(f: Path):
-            code = f.read_text(errors="ignore")
-            if len(code) > MAX_CHARS:
-                return f, "skipped (file too large)"
-            try:
-                f.write_text(clean_code(code))
-                return f, "cleaned"
-            except Exception as e:
-                return f, f"unchanged ({e})"
+def get_job(job_id):
+    job = store.get(job_id) if ID_RE.fullmatch(job_id) else None
+    if not job:
+        raise HTTPException(404, 'Unknown job')
+    return job
 
 
-        results = []
-        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-            futures = [pool.submit(clean_one, f) for f in chosen]
-            for i, fut in enumerate(as_completed(futures), 1):
-                results.append(fut.result())
-                set_status(job_id, "running", f"AI cleanup {i}/{len(chosen)}")
-
-        set_status(job_id, "running", "Writing project overview...")
-        parts = []
-        for f in chosen:
-            decl = [
-                ln.strip() for ln in f.read_text(errors="ignore").splitlines()
-                if re.search(r"\b(class|interface|enum|struct)\b", ln)
-                or re.search(r"\b(public|protected|internal)\b.*\(", ln)
-            ]
-            parts.append(f"## {f.name}\n" + "\n".join(decl[:25]))
-        summary = "\n\n".join(parts)[:40000]
-        (raw / "OVERVIEW.md").write_text(make_overview(summary))
-
-        notes = "\n".join(f"{f.name}: {r}" for f, r in sorted(results, key=lambda x: x[0].name))
-        (raw / "NOTES.txt").write_text("AI cleanup results\n\n" + notes + "\n")
-
-        shutil.make_archive(str(job / "result"), "zip", raw)
-        cleaned = sum(1 for _, r in results if r == "cleaned")
-        set_status(job_id, "done", f"Done. {cleaned} of {len(chosen)} files cleaned by AI.")
+@app.get('/api/config')
+def get_config():
+    return {
+        'model': config.MODEL, 'price_in': config.PRICE_IN_PER_M, 'price_out': config.PRICE_OUT_PER_M,
+        'max_run_tokens': config.MAX_RUN_TOKENS, 'max_upload_mb': config.MAX_UPLOAD_MB,
+    }
 
 
-    except UnsupportedGame as e:
-        set_status(job_id, "error", str(e))
-    except subprocess.CalledProcessError as e:
-        set_status(job_id, "error", f"Decompiler failed: {(e.stderr or '')[:300]}")
-    except Exception as e:
-        set_status(job_id, "error", f"{type(e).__name__}: {e}")
-
-
-@app.post("/upload")
+@app.post('/api/upload')
 async def upload(file: UploadFile, bg: BackgroundTasks):
-    name = Path(file.filename or "").name
-    if not name.lower().endswith((".zip", ".dll")):
-        raise HTTPException(400, "Upload a .zip of the game folder or a .dll file.")
-
+    name = Path(file.filename or '').name
+    if not name.lower().endswith(ALLOWED):
+        raise HTTPException(400, 'Upload Assembly-CSharp.dll, an .apk, a .jar or a .zip of the game folder.')
     job_id = uuid.uuid4().hex
-    up = JOBS / job_id / "upload"
+    up = store.base(job_id) / 'upload'
     up.mkdir(parents=True)
-    size, too_big = 0, False
-    with open(up / name, "wb") as out:
+    limit = config.MAX_UPLOAD_MB * 1024 * 1024
+    size = 0
+    with open(up / name, 'wb') as out:
         while chunk := await file.read(1024 * 1024):
             size += len(chunk)
-            if size > MAX_UPLOAD:
-                too_big = True
+            if size > limit:
                 break
             out.write(chunk)
-    if too_big:
-        shutil.rmtree(JOBS / job_id, ignore_errors=True)
-        raise HTTPException(413, "File is too large (limit 300 MB).")
+    if size > limit:
+        shutil.rmtree(store.base(job_id), ignore_errors=True)
+        raise HTTPException(413, f'File is too large (limit {config.MAX_UPLOAD_MB} MB). '
+                                 'Upload only Assembly-CSharp.dll or the APK instead of the whole game.')
+    store.create(job_id, name)
+    bg.add_task(pipeline.prepare, store, job_id)
+    return {'job_id': job_id}
 
 
-    set_status(job_id, "queued", "Queued...")
-    bg.add_task(process, job_id)
-    return {"job_id": job_id}
+@app.get('/api/jobs')
+def list_jobs():
+    return store.list()
 
 
-@app.get("/status/{job_id}")
-def status(job_id: str):
-    return STATUS.get(job_id, {"state": "unknown", "message": "Unknown job"})
+@app.get('/api/jobs/{job_id}')
+def job_info(job_id: str):
+    return get_job(job_id)
 
 
-@app.get("/download/{job_id}")
+@app.post('/api/jobs/{job_id}/clean')
+async def clean_job(job_id: str, request: Request, bg: BackgroundTasks):
+    job = get_job(job_id)
+    if job['state'] not in ('ready', 'done', 'cancelled', 'interrupted') or not job['files']:
+        raise HTTPException(409, 'This job cannot be cleaned right now.')
+    body = await request.json()
+    known = {f['path']: f for f in job['files']}
+    selected = [p for p in body.get('files', []) if p in known]
+    if not selected:
+        raise HTTPException(400, 'No files selected.')
+    estimate = sum(known[p]['est_tokens'] for p in selected)
+    if estimate > config.MAX_RUN_TOKENS:
+        raise HTTPException(400, f'The selection is estimated at {estimate:,} tokens, above the limit of '
+                                 f'{config.MAX_RUN_TOKENS:,} per run. Select fewer files.')
+    bg.add_task(pipeline.clean, store, job_id, selected)
+    store.update(job_id, state='queued', message='Starting...')
+    return {'ok': True, 'files': len(selected), 'estimated_tokens': estimate}
+
+
+@app.post('/api/jobs/{job_id}/cancel')
+def cancel_job(job_id: str):
+    get_job(job_id)
+    store.request_cancel(job_id)
+    return {'ok': True}
+
+
+@app.get('/api/jobs/{job_id}/file')
+def job_file(job_id: str, path: str, version: str = 'raw'):
+    get_job(job_id)
+    folder = (store.base(job_id) / ('result' if version == 'clean' else 'raw')).resolve()
+    target = (folder / path).resolve()
+    if not target.is_relative_to(folder) or not target.is_file():
+        raise HTTPException(404, 'File not found')
+    return PlainTextResponse(target.read_text(encoding='utf-8', errors='ignore'))
+
+
+@app.get('/api/jobs/{job_id}/download')
 def download(job_id: str):
-    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
-        raise HTTPException(404)
-    z = JOBS / job_id / "result.zip"
-    if not z.exists():
-        raise HTTPException(404, "Result not ready")
-    return FileResponse(z, filename="decompiled.zip")
-
+    job = get_job(job_id)
+    base = store.base(job_id)
+    if not (base / 'result').exists():
+        raise HTTPException(404, 'Nothing to download yet')
+    if not (base / 'decompiled.zip').exists() or job['state'] not in ('done', 'cancelled'):
+        shutil.make_archive(str(base / 'decompiled'), 'zip', base / 'result')
+    return FileResponse(base / 'decompiled.zip', filename='decompiled.zip')
 
 
 # Must be last: serves the web page
-app.mount("/", StaticFiles(directory=BASE / "static", html=True), name="static")
+app.mount('/', StaticFiles(directory=config.BASE / 'static', html=True), name='static')
