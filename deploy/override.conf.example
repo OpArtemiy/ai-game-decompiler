@@ -1,0 +1,16 @@
+# Copy to /etc/systemd/system/decompiler.service.d/override.conf (update.sh does this for you the first time)
+# After editing run:  sudo systemctl daemon-reload && sudo systemctl restart decompiler
+[Service]
+# Bedrock inference profile ID that works on your account
+Environment=MODEL=eu.anthropic.claude-opus-4-6-v1
+# Optional cheaper model for small chunks (leave empty to use MODEL for everything)
+#Environment=MODEL_SMALL=
+# Prices in USD per million tokens, from the Bedrock pricing page. Shows the estimated cost in the web page.
+#Environment=PRICE_IN_PER_M=0
+#Environment=PRICE_OUT_PER_M=0
+# Seconds to wait between AI calls (raise this if you see throttling)
+#Environment=MIN_INTERVAL=1
+# Largest estimated token count allowed in a single cleaning run
+#Environment=MAX_RUN_TOKENS=600000
+# Parts of big files are at most this many characters
+#Environment=MAX_CHUNK_CHARS=12000
