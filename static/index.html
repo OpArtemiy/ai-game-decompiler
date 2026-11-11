@@ -1,22 +1,261 @@
-<!doctype html><meta charset=utf-8><title>Game Decompiler</title>
-<body style="font-family:sans-serif;max-width:640px;margin:40px auto">
-<h1>AI Game Decompiler</h1>
-<p>Upload a Unity (Mono) game folder as .zip, or Assembly-CSharp.dll. Only upload games you own or may analyze.</p>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Game Decompiler</title>
+<style>
+:root{--bg:#0b1020;--panel:#141b30;--line:#26304d;--text:#e6e9f5;--muted:#8c97b8;--accent:#4f8cff;--ok:#3ecf8e;--warn:#f5a524;--bad:#ff6b6b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,'Segoe UI',sans-serif}
+main{max-width:1100px;margin:0 auto;padding:24px}
+h1{margin:0 0 4px;font-size:1.6rem}
+h2{margin:0 0 10px;font-size:1.05rem}
+.muted{color:var(--muted)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin:16px 0}
+button,select{font:inherit;border-radius:8px;padding:7px 14px}
+button{background:var(--accent);color:#fff;border:0;cursor:pointer}
+button.ghost{background:transparent;border:1px solid var(--line);color:var(--text)}
+button.danger{background:var(--bad)}
+button:disabled{opacity:.45;cursor:not-allowed}
+select{background:var(--bg);color:var(--text);border:1px solid var(--line)}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600}
+.path{font-family:ui-monospace,Consolas,monospace;word-break:break-all}
+.badge{padding:1px 8px;border-radius:99px;font-size:11px;border:1px solid var(--line)}
+.game{color:var(--ok)}.library{color:var(--warn)}.generated{color:var(--muted)}
+.cleaned{color:var(--ok)}.partial{color:var(--warn)}.unchanged,.failed{color:var(--bad)}
+.bar{height:8px;background:var(--line);border-radius:99px;overflow:hidden;margin:10px 0}
+.bar>div{height:100%;background:var(--accent);width:0;transition:width .4s}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
+.jobs button{margin:0 6px 6px 0}
+dialog{width:min(1250px,96vw);height:86vh;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:14px}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:10px;height:calc(100% - 56px)}
+.cols h2{margin:0 0 6px}
+pre{margin:0;overflow:auto;background:#0a0f1d;padding:10px;border-radius:8px;font-size:12px;height:calc(100% - 28px);white-space:pre}
+.error{color:var(--bad)}
+@media(max-width:800px){.cols{grid-template-columns:1fr;overflow:auto}}
+</style>
+</head>
+<body>
+<main>
+  <h1>AI Game Decompiler</h1>
+  <p class="muted">Upload a Unity (Mono) game's <code>Assembly-CSharp.dll</code>, an Android <code>.apk</code>, or a zip of the game folder.
+  The server decompiles it, you choose which files the AI should clean up, and you download the result.
+  Only use games you own or are allowed to analyze.</p>
 
-<input type=file id=f accept=".zip,.dll"> <button onclick=go()>Decompile</button>
+  <div class="panel">
+    <div class="row">
+      <input type="file" id="file" accept=".zip,.dll,.apk,.jar">
+      <button id="upload">Decompile</button>
+      <span id="uploadMsg" class="muted"></span>
+    </div>
+    <div class="muted">Tip: for big games upload only <code>Assembly-CSharp.dll</code> (inside <code>&lt;Game&gt;_Data/Managed</code>) or the APK, not the whole game.</div>
+  </div>
 
-<p id=s></p><p id=d></p>
+  <div class="panel" id="history" hidden>
+    <h2>Recent jobs</h2>
+    <div class="jobs" id="jobs"></div>
+  </div>
+
+  <div class="panel" id="job" hidden>
+    <h2 id="jobTitle"></h2>
+    <div id="status"></div>
+    <div class="bar"><div id="bar"></div></div>
+    <div id="totals" class="muted"></div>
+    <div class="row">
+      <button id="start">Clean selected files with AI</button>
+      <button id="cancel" class="danger" hidden>Cancel</button>
+      <button id="download" class="ghost">Download zip</button>
+      <span class="muted">Select:</span>
+      <button class="ghost" id="selSuggested">Suggested</button>
+      <button class="ghost" id="selGame">All game code</button>
+      <button class="ghost" id="selNone">None</button>
+      <span class="muted">Show:</span>
+      <select id="filter">
+        <option value="all">All files</option>
+        <option value="game">Game code</option>
+        <option value="library">Libraries</option>
+        <option value="generated">Generated</option>
+      </select>
+    </div>
+    <table>
+      <thead><tr><th></th><th>File</th><th>Type</th><th>Size</th><th>Est. tokens</th><th>Status</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+</main>
+
+<dialog id="viewer">
+  <div class="row"><strong id="viewerTitle" class="path"></strong><span class="muted" id="viewerNote"></span>
+    <button class="ghost" id="viewerClose" style="margin-left:auto">Close</button></div>
+  <div class="cols">
+    <div><h2>Before (decompiled)</h2><pre id="before"></pre></div>
+    <div><h2>After (AI cleanup)</h2><pre id="after"></pre></div>
+  </div>
+</dialog>
 
 <script>
-async function go(){
- const f=document.getElementById('f').files[0]; if(!f)return;
- const s=document.getElementById('s'); s.textContent='Uploading...';
- const fd=new FormData(); fd.append('file',f);
- const r=await fetch('/upload',{method:'POST',body:fd});
- if(!r.ok){s.textContent=(await r.json()).detail;return}
- const id=(await r.json()).job_id;
- const t=setInterval(async()=>{
-  const j=await (await fetch('/status/'+id)).json(); s.textContent=j.message;
-  if(j.state=='done'){clearInterval(t);document.getElementById('d').innerHTML='<a href="/download/'+id+'">Download result</a>'}
-  if(j.state=='error')clearInterval(t)},2000)}
+const $ = (id) => document.getElementById(id);
+const ACTIVE = ['queued', 'decompiling', 'cleaning'];
+const DONE_FILE = ['cleaned', 'partial', 'unchanged', 'failed'];
+let cfg = { price_in: 0, price_out: 0, max_run_tokens: 0 };
+let job = null, selected = new Set(), selJob = null, timer = null;
+
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const fmt = (n) => Number(n).toLocaleString('en-US');
+const kb = (n) => (n / 1024).toFixed(1) + ' KB';
+const money = (i, o) => (cfg.price_in || cfg.price_out) ? ' (about $' + ((i * cfg.price_in + o * cfg.price_out) / 1e6).toFixed(2) + ')' : '';
+
+async function api(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) {
+    let msg = r.statusText;
+    try { msg = (await r.json()).detail || msg; } catch (e) { /* keep status text */ }
+    throw new Error(msg);
+  }
+  return r;
+}
+
+async function loadHistory() {
+  try {
+    const list = await (await api('/api/jobs')).json();
+    $('history').hidden = list.length === 0;
+    $('jobs').innerHTML = list.map((j) =>
+      `<button class="ghost" data-id="${j.id}">${esc(j.filename)} <span class="muted">${esc(j.state)}</span></button>`).join('');
+  } catch (e) { /* history is optional */ }
+}
+
+async function loadJob(id) {
+  try {
+    job = await (await api('/api/jobs/' + id)).json();
+  } catch (e) {
+    $('uploadMsg').textContent = e.message;
+    return;
+  }
+  if (selJob !== job.id) {
+    selJob = job.id;
+    selected = new Set(job.files.filter((f) => f.suggested).map((f) => f.path));
+  }
+  render();
+  clearTimeout(timer);
+  if (ACTIVE.includes(job.state)) timer = setTimeout(() => loadJob(job.id), 2000);
+  else loadHistory();
+}
+
+function estimate() {
+  let i = 0, o = 0;
+  job.files.forEach((f) => { if (selected.has(f.path)) { i += f.est_in; o += f.est_out; } });
+  return { i, o, total: i + o };
+}
+
+function render() {
+  const busy = ACTIVE.includes(job.state);
+  $('job').hidden = false;
+  $('jobTitle').textContent = job.filename + (job.game_type ? ' (' + job.game_type + ')' : '');
+  $('status').innerHTML = `<strong>${esc(job.state)}</strong>: ${esc(job.message)}`;
+
+  const inRun = job.files.filter((f) => f.status !== 'pending');
+  const finished = inRun.filter((f) => DONE_FILE.includes(f.status)).length;
+  $('bar').style.width = (job.state === 'cleaning' && inRun.length ? Math.round(100 * finished / inRun.length) : (busy ? 5 : 0)) + '%';
+
+  const est = estimate();
+  const over = cfg.max_run_tokens && est.total > cfg.max_run_tokens;
+  let totals = `${selected.size} files selected, about ${fmt(est.total)} tokens${money(est.i, est.o)}`;
+  if (over) totals += ` <span class="error">(above the limit of ${fmt(cfg.max_run_tokens)} per run, select fewer files)</span>`;
+  if (job.usage && job.usage.calls) {
+    totals += `<br>Used so far: ${fmt(job.usage.input)} input + ${fmt(job.usage.output)} output tokens in ${job.usage.calls} AI calls${money(job.usage.input, job.usage.output)}`;
+  }
+  $('totals').innerHTML = totals;
+
+  $('start').disabled = busy || selected.size === 0 || over || !job.files.length;
+  $('cancel').hidden = !busy || job.state === 'decompiling';
+  $('download').disabled = !['ready', 'done', 'cancelled'].includes(job.state);
+
+  const filter = $('filter').value;
+  $('rows').innerHTML = job.files.filter((f) => filter === 'all' || f.category === filter).map((f) => `
+    <tr>
+      <td><input type="checkbox" data-path="${esc(f.path)}" ${selected.has(f.path) ? 'checked' : ''} ${busy ? 'disabled' : ''}></td>
+      <td class="path">${esc(f.path)}${f.suggested ? ' <span class="badge">suggested</span>' : ''}</td>
+      <td><span class="badge ${f.category}">${f.category}</span></td>
+      <td>${kb(f.chars)}${f.parts > 1 ? ' <span class="muted">(' + f.parts + ' parts)</span>' : ''}</td>
+      <td>${fmt(f.est_tokens)}</td>
+      <td class="${f.status}">${f.status === 'pending' ? '' : esc(f.status)}${f.note ? '<div class="muted">' + esc(f.note) + '</div>' : ''}</td>
+      <td><button class="ghost" data-view="${esc(f.path)}">View</button></td>
+    </tr>`).join('');
+}
+
+async function upload() {
+  const file = $('file').files[0];
+  if (!file) { $('uploadMsg').textContent = 'Choose a file first.'; return; }
+  $('upload').disabled = true;
+  $('uploadMsg').textContent = 'Uploading...';
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await (await api('/api/upload', { method: 'POST', body: fd })).json();
+    $('uploadMsg').textContent = '';
+    selJob = null;
+    await loadJob(res.job_id);
+  } catch (e) {
+    $('uploadMsg').innerHTML = '<span class="error">' + esc(e.message) + '</span>';
+  }
+  $('upload').disabled = false;
+}
+
+async function startClean() {
+  try {
+    await api('/api/jobs/' + job.id + '/clean', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ files: [...selected] }),
+    });
+    await loadJob(job.id);
+  } catch (e) {
+    $('status').innerHTML = '<span class="error">' + esc(e.message) + '</span>';
+  }
+}
+
+async function view(path) {
+  const q = '/api/jobs/' + job.id + '/file?path=' + encodeURIComponent(path) + '&version=';
+  $('viewerTitle').textContent = path;
+  $('before').textContent = 'Loading...';
+  $('after').textContent = '';
+  $('viewerNote').textContent = '';
+  $('viewer').showModal();
+  try {
+    const [a, b] = await Promise.all([api(q + 'raw').then((r) => r.text()), api(q + 'clean').then((r) => r.text())]);
+    $('before').textContent = a.slice(0, 200000);
+    $('after').textContent = b.slice(0, 200000);
+    if (a === b) $('viewerNote').textContent = 'No AI changes for this file.';
+    else if (a.length > 200000) $('viewerNote').textContent = 'Only the first 200,000 characters are shown. The download has everything.';
+  } catch (e) {
+    $('before').textContent = e.message;
+  }
+}
+
+$('upload').onclick = upload;
+$('start').onclick = startClean;
+$('cancel').onclick = async () => { await api('/api/jobs/' + job.id + '/cancel', { method: 'POST' }); $('cancel').disabled = true; };
+$('download').onclick = () => { window.location = '/api/jobs/' + job.id + '/download'; };
+$('viewerClose').onclick = () => $('viewer').close();
+$('filter').onchange = () => job && render();
+$('selSuggested').onclick = () => { selected = new Set(job.files.filter((f) => f.suggested).map((f) => f.path)); render(); };
+$('selGame').onclick = () => { selected = new Set(job.files.filter((f) => f.category === 'game').map((f) => f.path)); render(); };
+$('selNone').onclick = () => { selected = new Set(); render(); };
+$('rows').onchange = (e) => {
+  const p = e.target.dataset.path;
+  if (!p) return;
+  e.target.checked ? selected.add(p) : selected.delete(p);
+  render();
+};
+$('rows').onclick = (e) => { const p = e.target.dataset.view; if (p) view(p); };
+$('jobs').onclick = (e) => { const b = e.target.closest('button'); if (b) { selJob = null; loadJob(b.dataset.id); } };
+
+(async () => {
+  try { cfg = await (await api('/api/config')).json(); } catch (e) { /* defaults */ }
+  loadHistory();
+})();
 </script>
+</body>
+</html>
